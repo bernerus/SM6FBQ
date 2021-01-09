@@ -1,1 +1,2 @@
-# SM6FBQ
+# SM6FBQ Ham radio software
+Nothing here yet...
