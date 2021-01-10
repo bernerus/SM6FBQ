@@ -11,12 +11,10 @@ class PCF:
         self.status = True
         self.pin_mode_flags = 0x00
         self.sm_bus_number = 1
-        print("Setting up PCF85 address=%d" % address)
         PCF85.setup(address, self.sm_bus_number, self.status)
 
     def pin_mode(self, pin_name, mode):
         self.pin_mode_flags = PCF85.pin_mode(pin_name, mode, self.pin_mode_flags)
-        print("Mode flags on %d is %d" % (self.address, self.pin_mode_flags))
 
     def bit_read(self, pin_name):
         return PCF85.bit_read(pin_name, self.sm_bus_number, self.address)
