@@ -3,200 +3,293 @@ import time
 import RPi.GPIO as GPIO
 import smbus2
 import pcf8574
-
 import sqlite3
+
+from flask import Flask, request
+
+app = Flask(__name__)
 
 db = sqlite3.connect("/home/pi/SM6FBQ/azel.db")
 
 db.execute("CREATE TABLE IF NOT EXISTS azel_current (id INTEGER PRIMARY KEY AUTOINCREMENT, az int, el int)")
+db.execute("CREATE TABLE IF NOT EXISTS config_int (key text PRIMARY KEY , value int)")
 
 
-bus = smbus2.SMBus(1)
+class AzElControl:
 
-# Pin names
+    def __init__(self, hysteresis=1, gpio_bus=1):
+        self.bus = smbus2.SMBus(gpio_bus)
+        self.az_hysteresis = hysteresis
+        # Pin names
+        self.AZ_TIMER = "p0"
+        self.STOP_AZ = "p1"
+        self.ROTATE_CW = "p2"
+        self.RUN_EL = "p3"
+        self.EL_UP = "p4"
 
-START_AZ = "p0"
-STOP_AZ = "p1"
-ROTATE_CCW = "p2"
-RUN_EL = "p3"
-EL_UP = "p4"
+        self.AZ_IND_A = 1
+        self.AZ_IND_B = 2
+        self.EL_PULSE = "p2"
 
-AZ_IND_A = 1
-AZ_IND_B = 2
-EL_PULSE = "p2"
+        self.AZ_INT = 17
 
-AZ_INT = 17
+        self.AZ_CCW_MECH_STOP: int = 0
+        self.AZ_CW_MECH_STOP: int = 734
 
-AZ_CCW_MECH_STOP: int = 0
-AZ_CW_MECH_STOP: int = 734
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(self.AZ_INT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(AZ_INT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        self.calibrating = False
 
-azz2inc = {0b0000: 0,
-           0b0001: 1,
-           0b0010: -1,
-           0b0101: 0,
-           0b0111: 1,
-           0b0100: -1,
-           0b1111: 0,
-           0b1110: 1,
-           0b1101: -1,
-           0b1010: 0,
-           0b1000: 1,
-           0b1011: -1
-           }
+        self.azz2inc = {0b0000: 0,
+                        0b0001: 1,
+                        0b0010: -1,
+                        0b0101: 0,
+                        0b0111: 1,
+                        0b0100: -1,
+                        0b1111: 0,
+                        0b1110: 1,
+                        0b1101: -1,
+                        0b1010: 0,
+                        0b1000: 1,
+                        0b1011: -1
+                        }
 
-last_sense = 0xff
-az_target=None
-az = 0
-inc = 0
+        self.last_sense = 0xff
+        self.az_target = None
+        self.az = 0
+        self.inc = 0
+        self.ignore_cw_stops = False
+        self.ignore_ccw_stops = False
 
-def el_interrupt(channel, last, current):
-    pass
+    def el_interrupt(self, last, current):
+        pass
 
-def stop_interrupt(channel, last, current):
-    global az
-    global inc
+    def stop_interrupt(self, last, current):
 
-    if not p0.bit_read(STOP_AZ):
-        return
-    # We ran into the mech stop
-    if inc == 0:
-        print("Mech stop. Unknown dir")
-        az_cw()
-        time.sleep(2)
-        inc = 1
-        return
-    if inc > 0:
-        print("Mech stop clockwise")
-        az = AZ_CW_MECH_STOP
-    if inc < 0:
-        print("Mech stop counterclockwise")
-        az = AZ_CCW_MECH_STOP
-
-def az_interrupt(channel, last_az, current_az):
-    global az
-    global inc
-
-    print("Azint %x %x" % (last_az, current_az))
-    try:
-        inc = -azz2inc[last_az << 2 | current_az]
-    except KeyError:
-        print("Key error: index=%s" % bin(last_az << 2 | current_az))
-        return
-    az += inc
-    if inc:
-        pulse_az_enable()
-    print(az)
-
-    az_track()
-
-
-def az_track(target=None):
-    global az_target
-    if target is not None:
-        az_target = target
-
-    if az_target is not None:
-        diff = az - az_target
-        print("Diff = ", diff)
-        if abs(diff) < 3:
-            az_stop()
-            return
-        if diff < 0:
-            az_cw()
+        if not self.p0.bit_read(self.STOP_AZ):
+            # print("Stop interrupt skipped. timer is cleared")
+            return  # Timed is cleared
+        if self.p0.bit_read(self.AZ_TIMER):
+            # print("Stop interrupt skipped. No rotation going on")
+            return  # We are not rotating
+        # time.sleep(1)
+        # We ran into a mech stop
+        if False:
+            if inc == 0:
+                # print("Mechanical stop. Unknown dir")
+                if not p0.bit_read(ROTATE_CW):
+                    # print("Was running clockwise")
+                    inc = 1
+                else:
+                    # print("Was running anticlockwise")
+                    inc = -1
+            if inc > 0 and not ignore_cw_stops:
+                # print("Mechanical stop clockwise")
+                self.az = AZ_CW_MECH_STOP
+                self.ignore_ccw_stops = True
+                # print("Ignoring anticlockwise stops")
+            if inc < 0 and not ignore_ccw_stops:
+                # print("Mechanical stop anticlockwise")
+                self.az = AZ_CCW_MECH_STOP
+                self.ignore_cw_stops = True
+                # print("Ignoring clockwise stops")
         else:
-            az_ccw()
+            if not self.p0.bit_read(self.ROTATE_CW):
+                # print("Mechanical stop clockwise")
+                self.az = self.AZ_CW_MECH_STOP
+                self.ignore_ccw_stops = True
+            else:
+                # print("Mechanical stop anticlockwise")
+                self.az = self.AZ_CCW_MECH_STOP
+                self.ignore_cw_stops = True
 
-def az_stop():
-    print("Stopping azimuth rotation")
-    p0.bit_write(STOP_AZ, pcf8574.LOW)  # Stop azimuth rotation
+        print("Az set to", self.az)
+        if self.calibrating:
+            self.calibrating = False
+            self.az_stop()
+        else:
+            self.az_track()
 
-def az_cw():
-    print("Rotating clockwise")
-    p0.bit_write(START_AZ, pcf8574.LOW)  # Start CW
-    p0.bit_write(STOP_AZ, pcf8574.HIGH)  # Don't stop azimuth rotation
+    def az_interrupt(self, last_az, current_az):
 
-def az_ccw():
-    print("Rotating anticlockwise")
-    p0.bit_write(ROTATE_CCW, pcf8574.LOW)
-    p0.bit_write(START_AZ, pcf8574.LOW)  # Start CCW
-    p0.bit_write(STOP_AZ, pcf8574.HIGH)   # Don't stop azimuth rotation
+        # print("Azint; %x %x" % (last_az, current_az))
+        try:
+            inc = self.azz2inc[last_az << 2 | current_az]
+        except KeyError:
+            print("Key error: index=%s" % bin(last_az << 2 | current_az))
+            self.az_track()
+            return
+        self.az += inc
+        if inc:
+            if inc > 0:
+                ignore_ccw_stops = False
+                # print("Enabling ccw stops")
+            else:
+                ignore_cw_stops = False
+                # print("Enabling cw stops")
+            self.retrigger_az_timer()
 
+        print(self.az)
 
-def interrupt_dispatch(channel):
-    global last_sense
-    global current_sense
+        self.az_track()
 
-    current_sense = p1.byte_read(0xff)
-    # print("Interrupt %x %x" %(last_sense, current_sense))
+    def az_track(self, target=None):
+        if target is not None:
+            self.az_target = target
 
-    diff = current_sense ^ last_sense
+        if self.az_target is not None:
+            diff = self.az - self.az_target
+            # print("Diff = ", diff)
+            if abs(diff) < self.az_hysteresis:
+                self.az_stop()
+                return
+            if diff < 0:
+                self.az_cw()
+            else:
+                self.az_ccw()
 
-    az_mask = 0x03
-    el_mask = 0x04
-    stop_mask = 0x08
+    def az_stop(self):
+        print("Stopping azimuth rotation")
 
-    if diff & az_mask:
-        az_interrupt(channel, last_sense & az_mask, current_sense & az_mask)
-    if diff & el_mask:
-        el_interrupt(channel,  last_sense & el_mask, current_sense & el_mask)
-    if diff & stop_mask:
-        stop_interrupt(channel, last_sense & stop_mask, current_sense & stop_mask)
+        self.p0.byte_write(0xff, 0xfd)
+        self.p0.bit_write(self.STOP_AZ, pcf8574.LOW)  # Stop azimuth rotation
+        self.p0.bit_write(self.AZ_TIMER, pcf8574.HIGH)  # Stop CCW
+        self.p0.bit_write(self.ROTATE_CW, pcf8574.HIGH)  # Stop CCW
 
-    last_sense = current_sense
+    def az_ccw(self):
+        print("Rotating anticlockwise")
+        self.p0.byte_write(0xff, 0xfe)
+        # p0.bit_write(ROTATE_CW, pcf8574.HIGH)  # Stop CW
+        # p0.bit_write(AZ_TIMER, pcf8574.LOW)  # Start
+        # p0.bit_write(STOP_AZ, pcf8574.HIGH)  # Don't stop azimuth rotation
 
+    def az_cw(self):
+        print("Rotating clockwise")
+        self.p0.byte_write(0xFF, 0xfa)
+        # p0.bit_write(ROTATE_CW, pcf8574.LOW)  # Start CW
+        # p0.bit_write(AZ_TIMER, pcf8574.LOW)  # Start
+        # p0.bit_write(STOP_AZ, pcf8574.HIGH)  # Don't stop azimuth rotation
 
-def pulse_az_enable():
-    p0.bit_write(START_AZ, "HIGH")
-    p0.bit_write(START_AZ, "LOW")
+    def sense2str(self, value):
+        x = 1
+        ret = ""
+        sensebits = {1: "A", 2: "B", 4: "E", 8: "C"}
+        while (x < 16):
+            if value & x:
+                ret += sensebits[x]
+            else:
+                ret += " "
+            x = x << 1
+        return ret
 
-GPIO.add_event_detect(AZ_INT, GPIO.FALLING, callback=interrupt_dispatch)
+    def interrupt_dispatch(self, channel):
 
-def restore_az():
-    global az
-    cur = db.cursor()
-    cur.execute("SELECT az FROM azel_current where ID=0")
-    rows = cur.fetchall()
-    if rows:
-        az = rows[0][0]
-    else:
-        az = 0
-        cur.execute("INSERT INTO azel_current VALUES(0,0,0)")
+        current_sense = self.p1.byte_read(0x0f)
+        # print("Interrupt %s %s" % (self.sense2str(self.last_sense), self.sense2str(current_sense)))
+
+        diff = current_sense ^ self.last_sense
+
+        az_mask = 0x03
+        el_mask = 0x04
+        stop_mask = 0x08
+
+        if diff & az_mask:
+            # print("Dispatching to az_interrupt")
+            self.az_interrupt(self.last_sense & az_mask, current_sense & az_mask)
+        if diff & el_mask:
+            # print("Dispatching to el_interrupt")
+            self.el_interrupt(self.last_sense & el_mask, current_sense & el_mask)
+        if diff & stop_mask and (current_sense & stop_mask == 0):
+            # print("Dispatching to stop_interrupt")
+            self.stop_interrupt(self.last_sense & stop_mask, current_sense & stop_mask)
+
+        self.last_sense = current_sense
+
+    def retrigger_az_timer(self):
+        self.p0.bit_write(self.AZ_TIMER, "HIGH")
+        self.p0.bit_write(self.AZ_TIMER, "LOW")
+
+    def restore_az(self):
+
+        cur = db.cursor()
+        cur.execute("SELECT az FROM azel_current where ID=0")
+        rows = cur.fetchall()
+        if rows:
+            self.az = rows[0][0]
+        else:
+            self.az = 0
+            cur.execute("INSERT INTO azel_current VALUES(0,0,0)")
+            db.commit()
+
+    def store_az(self):
+        cur = db.cursor()
+        cur.execute("UPDATE azel_current set az=? WHERE ID=0", (self.az,))
         db.commit()
 
-def store_az():
-    global az
-    cur = db.cursor()
-    cur.execute("UPDATE azel_current set az=? WHERE ID=0", (az,))
-    db.commit()
+    def startup(self):
+        self.p0 = pcf8574.PCF(0x20)
+        self.p1 = pcf8574.PCF(0x21)
+
+        self.p0.pin_mode("p0", "OUTPUT")
+        self.p0.pin_mode("p1", "OUTPUT")
+        self.p0.pin_mode("p2", "OUTPUT")
+
+        self.p1.pin_mode("p0", "INPUT")
+        self.p1.pin_mode("p1", "INPUT")
+        self.p1.pin_mode("p2", "INPUT")
+        self.p1.pin_mode("p3", "INPUT")
+
+        # print("Restoring current azimuth")
+        self.restore_az()
+        # print("Az restored to %d" % self.az)
+        self.az_stop()
+        # print("Starting interrupt dispatcher")
+        GPIO.add_event_detect(self.AZ_INT, GPIO.FALLING, callback=self.interrupt_dispatch)
 
 
-
-p0 = pcf8574.PCF(0x20)
-p1 = pcf8574.PCF(0x21)
-
-p0.pin_mode("p0", "OUTPUT")
-p0.pin_mode("p1", "OUTPUT")
-p0.pin_mode("p2", "OUTPUT")
-
-p1.pin_mode("p0", "INPUT")
-p1.pin_mode("p1", "INPUT")
-p1.pin_mode("p2", "INPUT")
-p1.pin_mode("p3", "INPUT")
+@app.route('/az')
+def get_azimuth():
+    return "Az=%d ticks" % ctl.az
 
 
-restore_az()
+@app.route('/calibrate')
+def calibrate():
+    ctl.calibrating = True
+    ctl.az_target = None
+    ctl.az_cw()
+    time.sleep(1)
+    ctl.az_stop()
+    ctl.az_ccw()
+    print("Awaiting calibration")
+    while ctl.calibrating:
+        time.sleep(1)
+        print("Az is %d" % ctl.az)
+
+    return "Calibration done, az=%d ticks" % ctl.az
+
+@app.route("/track")
+def track():
+    target=request.args.get('az')
+    ctl.az_track(int(target))
+    return "Tracking azimuth %d" % int(target)
+
+@app.route("/untrack")
+def untrack():
+    ctl.az_target = None
+    ctl.az_stop()
+    return "Stopped tracking"
 
 
-print("Az=%d" % az)
+if __name__ == '__main__':
 
-try:
-    az_track(target=78)
+    ctl = AzElControl()
 
-    while(1):
-        time.sleep(10)
-finally:
-    store_az()
-    GPIO.cleanup()  # clean up GPIO on normal exit
+    try:
+        ctl.startup()
+        app.run(host='0.0.0.0', port=8877)
+
+    finally:
+        ctl.az_stop()
+        ctl.store_az()
+        GPIO.cleanup()  # clean up GPIO on exit
