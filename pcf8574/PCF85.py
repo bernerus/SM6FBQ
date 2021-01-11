@@ -39,6 +39,10 @@ def byte_read(pin_mask, smbs, addr):
         b = bus.read_byte(addr)
     return b & pin_mask
 
+def byte_write(pin_mask, smbs, addr, value):
+    with SMBus(smbs) as bus:
+        bus.write_byte(addr, value & pin_mask)
+
 
 def pinNameToNum(pin_name):
     pn = int(pin_name.strip().replace("p", "").strip())
@@ -52,9 +56,11 @@ def test_bit(n, offset):
     mask = 1 << offset
     return (n & mask)
 
+
 def set_bit(n, offset):
     mask = 1 << offset
     return(n | mask)
+
 
 def clear_bit(n, offset):
     mask = ~(1 << offset)

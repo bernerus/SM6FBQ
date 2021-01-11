@@ -22,5 +22,8 @@ class PCF:
     def byte_read(self, pin_mask):
         return PCF85.byte_read(pin_mask, self.sm_bus_number, self.address)
 
+    def byte_write(self, pin_mask, value):
+        return PCF85.byte_write(pin_mask, self.sm_bus_number, self.address, value)
+
     def bit_write(self, pin_name, value):
         PCF85.bit_write(pin_name, value, self.address, self.pin_mode_flags, self.sm_bus_number)
