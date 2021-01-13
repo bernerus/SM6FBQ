@@ -4,10 +4,19 @@ import RPi.GPIO as GPIO
 import smbus2
 import pcf8574
 import sqlite3
+import json
 
-from flask import Flask, request
+from flask import Flask, request, render_template
+
+from flask_googlemaps import GoogleMaps, Map
 
 app = Flask(__name__)
+
+api_key = '<google-api-key>'  # change this to your api key
+# get api key from Google API Console (https://console.cloud.google.com/apis/)
+GoogleMaps(app, key=api_key)  # set api_key
+devices_data = {}  # dict to store data of devices
+devices_location = {}  # dict to store coordinates of devices
 
 db = sqlite3.connect("/home/pi/SM6FBQ/azel.db")
 
@@ -21,15 +30,15 @@ class AzElControl:
         self.bus = smbus2.SMBus(gpio_bus)
         self.az_hysteresis = hysteresis
         # Pin names
-        self.AZ_TIMER = "p0"
-        self.STOP_AZ = "p1"
-        self.ROTATE_CW = "p2"
-        self.RUN_EL = "p3"
-        self.EL_UP = "p4"
+        self.AZ_TIMER = 1 << 0
+        self.STOP_AZ = 1 << 1
+        self.ROTATE_CW = 1 << 2
+        self.RUN_EL = 1 << 3
+        self.EL_UP = 1 << 4
 
-        self.AZ_IND_A = 1
-        self.AZ_IND_B = 2
-        self.EL_PULSE = "p2"
+        self.AZ_IND_A = 1 << 0
+        self.AZ_IND_B = 1 << 1
+        self.EL_PULSE = 1 << 2
 
         self.AZ_INT = 17
 
@@ -152,24 +161,17 @@ class AzElControl:
     def az_stop(self):
         print("Stopping azimuth rotation")
 
-        self.p0.byte_write(0xff, 0xfd)
-        self.p0.bit_write(self.STOP_AZ, pcf8574.LOW)  # Stop azimuth rotation
-        self.p0.bit_write(self.AZ_TIMER, pcf8574.HIGH)  # Stop CCW
-        self.p0.bit_write(self.ROTATE_CW, pcf8574.HIGH)  # Stop CCW
+        self.p0.byte_write(0xff, ~self.STOP_AZ)
+        time.sleep(0.4)     # Allow mechanics to settle
+        ctl.store_az()
 
     def az_ccw(self):
         print("Rotating anticlockwise")
-        self.p0.byte_write(0xff, 0xfe)
-        # p0.bit_write(ROTATE_CW, pcf8574.HIGH)  # Stop CW
-        # p0.bit_write(AZ_TIMER, pcf8574.LOW)  # Start
-        # p0.bit_write(STOP_AZ, pcf8574.HIGH)  # Don't stop azimuth rotation
+        self.p0.byte_write(0xff, ~self.AZ_TIMER)
 
     def az_cw(self):
         print("Rotating clockwise")
-        self.p0.byte_write(0xFF, 0xfa)
-        # p0.bit_write(ROTATE_CW, pcf8574.LOW)  # Start CW
-        # p0.bit_write(AZ_TIMER, pcf8574.LOW)  # Start
-        # p0.bit_write(STOP_AZ, pcf8574.HIGH)  # Don't stop azimuth rotation
+        self.p0.byte_write(0xFF, ~(self.AZ_TIMER | self.ROTATE_CW))
 
     def sense2str(self, value):
         x = 1
@@ -207,11 +209,10 @@ class AzElControl:
         self.last_sense = current_sense
 
     def retrigger_az_timer(self):
-        self.p0.bit_write(self.AZ_TIMER, "HIGH")
-        self.p0.bit_write(self.AZ_TIMER, "LOW")
+        self.p0.bit_write("p0", "HIGH")
+        self.p0.bit_write("p0", "LOW")
 
     def restore_az(self):
-
         cur = db.cursor()
         cur.execute("SELECT az FROM azel_current where ID=0")
         rows = cur.fetchall()
@@ -268,17 +269,51 @@ def calibrate():
 
     return "Calibration done, az=%d ticks" % ctl.az
 
+
 @app.route("/track")
 def track():
-    target=request.args.get('az')
+    target = request.args.get('az')
     ctl.az_track(int(target))
     return "Tracking azimuth %d" % int(target)
+
 
 @app.route("/untrack")
 def untrack():
     ctl.az_target = None
     ctl.az_stop()
     return "Stopped tracking"
+
+
+@app.route('/', methods=["GET"])
+def my_map():
+    mymap = Map(
+
+                identifier="view-side",
+
+                varname="mymap",
+
+                style="height:720px;width:1100px;margin:0;",  # hardcoded!
+
+                lat=57.702129,  # hardcoded!
+
+                lng=12.139914,  # hardcoded!
+
+                zoom=15,
+
+                markers=[(57.702129, 12.139914)]  # hardcoded!
+
+            )
+
+    return render_template('map.html', mymap=mymap)
+
+
+
+@app.route('/getdata', methods=['GET', 'POST'])
+def getdata():
+    json_data = requests.get.args('json')
+    return json_data
+    # you can use this to get request with strings and parse json
+    # put data in database or something
 
 
 if __name__ == '__main__':
@@ -291,5 +326,4 @@ if __name__ == '__main__':
 
     finally:
         ctl.az_stop()
-        ctl.store_az()
         GPIO.cleanup()  # clean up GPIO on exit

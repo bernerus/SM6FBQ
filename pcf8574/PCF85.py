@@ -44,12 +44,15 @@ def byte_write(pin_mask, smbs, addr, value):
         bus.write_byte(addr, value & pin_mask)
 
 
-def pinNameToNum(pin_name):
-    pn = int(pin_name.strip().replace("p", "").strip())
-    if pn in range(8):
-        return pn
+def pinNameToNum(pin):
+    if type(pin) is str:
+        pn = int(pin.strip().replace("p", "").strip())
+        if pn in range(8):
+            return pn
+        else:
+            print("pin name error!")
     else:
-        print("pin name error!")
+        return pin
 
 
 def test_bit(n, offset):
