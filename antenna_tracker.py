@@ -1,20 +1,35 @@
 #!/usr/bin/env python3
+from threading import Lock
 import time
 import RPi.GPIO as GPIO
 import smbus2
 import pcf8574
 import sqlite3
-import json
+import queue
 
-from flask import Flask, request, render_template
+from flask import Flask, render_template, session, request, \
+    copy_current_request_context
+from flask_socketio import SocketIO, emit, join_room, leave_room, \
+    close_room, rooms, disconnect
+import maidenhead.src.maidenhead as mh
 
-from flask_googlemaps import GoogleMaps, Map
+# Set this variable to "threading", "eventlet" or "gevent" to test the
+# different async modes, or leave it set to None for the application to choose
+# the best option based on installed packages.
+async_mode = "eventlet"
 
-app = Flask(__name__)
+with open("etc/google_api.txt") as f:
+    api_key = f.readline()
 
-api_key = '<google-api-key>'  # change this to your api key
-# get api key from Google API Console (https://console.cloud.google.com/apis/)
-GoogleMaps(app, key=api_key)  # set api_key
+app = Flask(__name__, template_folder="./templates")
+app.config['SECRET_KEY'] = '!tgilmeh'
+app.config['GOOGLEMAPS_API_KEY'] = api_key
+
+socket_io = SocketIO(app, async_mode=async_mode)
+
+thread = None
+thread_lock = Lock()
+
 devices_data = {}  # dict to store data of devices
 devices_location = {}  # dict to store coordinates of devices
 
@@ -23,6 +38,7 @@ db = sqlite3.connect("/home/pi/SM6FBQ/azel.db")
 db.execute("CREATE TABLE IF NOT EXISTS azel_current (id INTEGER PRIMARY KEY AUTOINCREMENT, az int, el int)")
 db.execute("CREATE TABLE IF NOT EXISTS config_int (key text PRIMARY KEY , value int)")
 
+msgq = queue.Queue()
 
 class AzElControl:
 
@@ -45,10 +61,25 @@ class AzElControl:
         self.AZ_CCW_MECH_STOP: int = 0
         self.AZ_CW_MECH_STOP: int = 734
 
+        self.CCW_BEARING_STOP: int = 162
+        self.CW_BEARING_STOP: int = 167
+
+        bearing_range = self.CW_BEARING_STOP - self.CCW_BEARING_STOP + 360
+
+        self.ticks_per_degree = (self.AZ_CW_MECH_STOP - self.AZ_CCW_MECH_STOP)/bearing_range
+
+        self.last_sent_az = None
+
+        self.retriggering = None
+        self.rotatiog_cw = None
+        self.rotating_ccw = None
+
+
+
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(self.AZ_INT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-        self.calibrating = False
+        self.calibrating = None
 
         self.azz2inc = {0b0000: 0,
                         0b0001: 1,
@@ -67,9 +98,26 @@ class AzElControl:
         self.last_sense = 0xff
         self.az_target = None
         self.az = 0
+        self.el = 0
         self.inc = 0
         self.ignore_cw_stops = False
         self.ignore_ccw_stops = False
+
+    def ticks2az(self, ticks):
+        az = self.CCW_BEARING_STOP + ticks / self.ticks_per_degree
+        if az > 360:
+            az -= 360
+        if az < 0:
+            az += 360
+        return int(az)
+
+    def az2ticks(self, az):
+        az1 = az - self.CCW_BEARING_STOP
+        if az1 < 0:
+            az1 += 360
+        if az1 > 360:
+            az1 -= 360
+        return int(self.ticks_per_degree * az1)
 
     def el_interrupt(self, last, current):
         pass
@@ -77,11 +125,12 @@ class AzElControl:
     def stop_interrupt(self, last, current):
 
         if not self.p0.bit_read(self.STOP_AZ):
-            # print("Stop interrupt skipped. timer is cleared")
+            print("Stop interrupt skipped. timer is cleared")
             return  # Timed is cleared
-        if self.p0.bit_read(self.AZ_TIMER):
-            # print("Stop interrupt skipped. No rotation going on")
+        if self.p0.bit_read(self.AZ_TIMER) and not self.calibrating and not self.rotating_cw and not self.rotating_ccw:
+            print("Stop interrupt skipped. No rotation going on, retrig=%s, cw=%s, ccw=%s, calibrating=%s" % (self.retriggering, self.rotating_cw, self.rotating_ccw, self.calibrating))
             return  # We are not rotating
+        print("Azel interrupt, retrig=%s, cw=%s, ccw=%s, calibrating=%s" % (self.retriggering, self.rotating_cw, self.rotating_ccw, self.calibrating))
         # time.sleep(1)
         # We ran into a mech stop
         if False:
@@ -113,9 +162,11 @@ class AzElControl:
                 self.az = self.AZ_CCW_MECH_STOP
                 self.ignore_cw_stops = True
 
-        print("Az set to", self.az)
+        print("Az set to %d ticks" % self.az)
+        self.send_azel()
         if self.calibrating:
             self.calibrating = False
+            print("Calibration done")
             self.az_stop()
         else:
             self.az_track()
@@ -139,39 +190,58 @@ class AzElControl:
                 # print("Enabling cw stops")
             self.retrigger_az_timer()
 
-        print(self.az)
+        #            print("Ticks:", self.az)
+
+        self.send_azel()
 
         self.az_track()
 
     def az_track(self, target=None):
         if target is not None:
-            self.az_target = target
+            if self.az2ticks(target) != self.az_target:
+                self.az_target = self.az2ticks(target)
+                print("Tracking azimuth %d degrees = %d ticks" % (target, self.az_target))
 
         if self.az_target is not None:
             diff = self.az - self.az_target
             # print("Diff = ", diff)
             if abs(diff) < self.az_hysteresis:
                 self.az_stop()
+                # self.az_target = None
                 return
             if diff < 0:
-                self.az_cw()
+                if not self.rotating_cw:
+                    self.az_cw()
             else:
-                self.az_ccw()
+                if not self.rotating_ccw:
+                    self.az_ccw()
 
     def az_stop(self):
-        print("Stopping azimuth rotation")
-
+        #print("Stop azimuth rotation")
+        self.rotating_ccw = False
+        self.rotating_cw = False
         self.p0.byte_write(0xff, ~self.STOP_AZ)
-        time.sleep(0.4)     # Allow mechanics to settle
+        print("Stopped azimuth rotation")
+        time.sleep(0.4)  # Allow mechanics to settle
         ctl.store_az()
 
     def az_ccw(self):
-        print("Rotating anticlockwise")
+        #print("Rotate anticlockwise")
+        self.rotating_ccw = True
+        self.rotating_cw = False
+        self.p0.byte_write(0xff, self.STOP_AZ)
+        time.sleep(0.1)
         self.p0.byte_write(0xff, ~self.AZ_TIMER)
+        print("Rotating anticlockwise")
 
     def az_cw(self):
-        print("Rotating clockwise")
+        #print("Rotate clockwise")
+        self.rotating_cw = True
+        self.rotating_ccw = False
+        self.p0.byte_write(0xff, self.STOP_AZ)
+        time.sleep(0.1)
         self.p0.byte_write(0xFF, ~(self.AZ_TIMER | self.ROTATE_CW))
+        print("Rotating clockwise")
 
     def sense2str(self, value):
         x = 1
@@ -187,14 +257,14 @@ class AzElControl:
 
     def interrupt_dispatch(self, channel):
 
-        current_sense = self.p1.byte_read(0x0f)
+        current_sense = self.p1.byte_read(0x17)
         # print("Interrupt %s %s" % (self.sense2str(self.last_sense), self.sense2str(current_sense)))
 
         diff = current_sense ^ self.last_sense
 
         az_mask = 0x03
         el_mask = 0x04
-        stop_mask = 0x08
+        stop_mask = 0x10
 
         if diff & az_mask:
             # print("Dispatching to az_interrupt")
@@ -203,16 +273,19 @@ class AzElControl:
             # print("Dispatching to el_interrupt")
             self.el_interrupt(self.last_sense & el_mask, current_sense & el_mask)
         if diff & stop_mask and (current_sense & stop_mask == 0):
-            # print("Dispatching to stop_interrupt")
+            print("Dispatching to stop_interrupt, diff=%x, current_sense=%x, last_sense=%x" % (diff, current_sense, self.last_sense))
             self.stop_interrupt(self.last_sense & stop_mask, current_sense & stop_mask)
 
         self.last_sense = current_sense
 
     def retrigger_az_timer(self):
+        self.retriggering = True
         self.p0.bit_write("p0", "HIGH")
         self.p0.bit_write("p0", "LOW")
+        self.retriggering = False
 
     def restore_az(self):
+        db = sqlite3.connect("/home/pi/SM6FBQ/azel.db")
         cur = db.cursor()
         cur.execute("SELECT az FROM azel_current where ID=0")
         rows = cur.fetchall()
@@ -222,11 +295,14 @@ class AzElControl:
             self.az = 0
             cur.execute("INSERT INTO azel_current VALUES(0,0,0)")
             db.commit()
+        db.close()
 
     def store_az(self):
+        db = sqlite3.connect("/home/pi/SM6FBQ/azel.db")
         cur = db.cursor()
         cur.execute("UPDATE azel_current set az=? WHERE ID=0", (self.az,))
         db.commit()
+        db.close()
 
     def startup(self):
         self.p0 = pcf8574.PCF(0x20)
@@ -248,6 +324,13 @@ class AzElControl:
         # print("Starting interrupt dispatcher")
         GPIO.add_event_detect(self.AZ_INT, GPIO.FALLING, callback=self.interrupt_dispatch)
 
+    def send_azel(self, force=None):
+        to_send_az = self.ticks2az(self.az)
+        if to_send_az != self.last_sent_az or force:
+            print("Queueing azel %d %d" % (to_send_az, self.el))
+            msgq.put({"az": to_send_az, "el": self.el})
+            self.last_sent_az = to_send_az
+
 
 @app.route('/az')
 def get_azimuth():
@@ -261,11 +344,11 @@ def calibrate():
     ctl.az_cw()
     time.sleep(1)
     ctl.az_stop()
+    ctl.calibrating = True
     ctl.az_ccw()
     print("Awaiting calibration")
     while ctl.calibrating:
         time.sleep(1)
-        print("Az is %d" % ctl.az)
 
     return "Calibration done, az=%d ticks" % ctl.az
 
@@ -273,39 +356,24 @@ def calibrate():
 @app.route("/track")
 def track():
     target = request.args.get('az')
-    ctl.az_track(int(target))
-    return "Tracking azimuth %d" % int(target)
+    new_target = int(target)
+    if new_target != ctl.az_target:
+        ctl.az_track(int(target))
+    return "Tracking azimuth %d degrees" % int(target)
 
 
 @app.route("/untrack")
 def untrack():
     ctl.az_target = None
     ctl.az_stop()
+    print("Stopped tracking at az=%d degrees"% ctl.ticks2az(ctl.az))
     return "Stopped tracking"
 
+myqth = "JO67BQ68SL59"
 
-@app.route('/', methods=["GET"])
-def my_map():
-    mymap = Map(
-
-                identifier="view-side",
-
-                varname="mymap",
-
-                style="height:720px;width:1100px;margin:0;",  # hardcoded!
-
-                lat=57.702129,  # hardcoded!
-
-                lng=12.139914,  # hardcoded!
-
-                zoom=15,
-
-                markers=[(57.702129, 12.139914)]  # hardcoded!
-
-            )
-
-    return render_template('map.html', mymap=mymap)
-
+@app.route("/myqth")
+def my_qth():
+    return myqth
 
 
 @app.route('/getdata', methods=['GET', 'POST'])
@@ -316,13 +384,106 @@ def getdata():
     # put data in database or something
 
 
+@app.route("/", methods=['GET', 'POST'])
+def mapview():
+    n, s, w, e, lon, lat = mh.to_rect(my_qth)
+
+    user_location = (lon, lat)
+
+    rect = {
+        "stroke_color": '#0000FF',
+        "stroke_opacity": .7,
+        "stroke_weight": 1,
+        "fill_color": None,
+        "fill_opacity": 0,
+        "bounds": {
+            "north": n,
+            "west": w,
+            "south": s,
+            "east": e,
+        },
+    }
+
+    circle = {  # draw circle on map (user_location as center)
+        'stroke_color': '#0000FF',
+        'stroke_opacity': .9,
+        'stroke_weight': 5,
+        # line(stroke) style
+        'fill_color': '#FFFFFF',
+        'fill_opacity': .2,
+        # fill style
+        'center': {  # set circle to user_location
+            'lat': user_location[0],
+            'lng': user_location[1]
+        },
+        'radius': 500  # circle size (50 meters)
+    }
+
+    return render_template('example.html', async_mode=socket_io.async_mode)
+
+
+def messageReceived(methods=['GET', 'POST']):
+    print('message was received!!!')
+
+
+@socket_io.on('my event')
+def handle_my_custom_event(json):
+    print('received my event: ' + str(json))
+    emit('my response', json, callback=messageReceived)
+    ctl.send_azel()
+
+@socket_io.on("track az")
+def handle_track_az(json):
+    # print('received track_az: ' + str(json))
+    # emit('my response', json, callback=messageReceived)
+    ctl.az_track(int(json['az']))
+
+def background_thread():
+    """Example of how to send server generated events to clients."""
+    count = 0
+    while True:
+        count += 1
+        if not msgq.empty():
+            item = msgq.get_nowait()
+            # print("Sending azel %d %s" % (count, item))
+            socket_io.emit("set_azel", item)
+            # print("Sent azel %d %s" % (count, item))
+        else:
+            socket_io.sleep(0.1)
+
+
+@socket_io.event
+def my_ping():
+    emit('my_pong')
+
+
+@socket_io.event
+def connect():
+    global thread
+
+    # Clear the queue
+    try:
+        while not msgq.empty():
+            msgq.get_nowait()
+    except queue.Empty:
+        pass
+
+    ctl.send_azel()
+    with thread_lock:
+        if thread is None:
+            thread = socket_io.start_background_task(background_thread)
+    emit('my_response', {'data': 'Connected', 'count': 0})
+
+@socket_io.on('disconnect')
+def test_disconnect():
+    print('Client disconnected', request.sid)
+
 if __name__ == '__main__':
-
-    ctl = AzElControl()
-
+    pass
+    ctl = AzElControl(hysteresis=3)
     try:
         ctl.startup()
-        app.run(host='0.0.0.0', port=8877)
+        socket_io.run(app, host='0.0.0.0', port=8877, log_output=False, debug=False)
 
     finally:
         ctl.az_stop()

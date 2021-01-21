@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Synchronous Loading</title>
+    <meta name="description" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <meta property="og:title" content="">
+    <meta property="og:type" content="">
+    <meta property="og:url" content="">
+    <meta property="og:image" content="">
+
+    <link rel="apple-touch-icon" href="icon.png">
+    <!-- Place favicon.ico in the root directory -->
+
+    <link rel='stylesheet' href="{{ url_for('static',filename='css/normalize.css') }}">
+    <link rel='stylesheet' href="{{ url_for('static',filename='css/main.css') }}">
+    <link rel='stylesheet' href="{{ url_for('static',filename='css/style.css') }}">
+
+    <meta name="theme-color" content="#fafafa">
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=default"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.5.1/jquery.min.js" integrity="sha512-bLT0Qm9VnAYZDflyKcBaQ2gg0hSYNQrJ8RilYldYQ1FxQYoCLtUjuuRuZo+fjqhx/qtq/1itJ0C2ejDxltZVFg==" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/3.0.4/socket.io.js" integrity="sha512-aMGMvNYu8Ue4G+fHa359jcPb1u+ytAF+P2SCb+PxrjCdO3n3ZTxJ30zuH39rimUggmTwmh2u7wvQsDTHESnmfQ==" crossorigin="anonymous"></script>
+
+
+    <script type="text/javascript">
+        $(document).ready(function () {
+            // var mypeer = 'http://' + document.domain + ':' + location.port;
+            var socket = io();
+
+            console.log("Connecting to server");
+
+            socket.on('connect', function () {
+                console.log("Connected");
+                socket.emit('my event', {
+                    data: 'Map display Connected'
+                });
+                var form = $('form').on('submit', function (e) {
+                    e.preventDefault()
+                    let track_az = $('input.trkaz').val()
+                    socket.emit('track az', {
+                        az: track_az
+                    });
+                });
+            });
+            socket.on('my_response', function(msg, cb) {
+                $('#log').append('<br>' + $('<div/>').text('Received #' + msg.count + ': ' + msg.data).html());
+                if (cb)
+                    cb();
+            });
+
+            socket.on('set_azel', function (msg) {
+                {#confirm("Set_azel: " + msg.az + "/" + msg.el);#}
+                $('#log').append('<br>' + $('<div/>').text('Received azel#' + msg.count + ': ' + msg.data).html());
+                setAzimuth(msg.az);
+            })
+        });
+    </script>
+
+</head>
+<body>
+<h3>SM6FBQ QTH JO67BQ</h3>
+
+<div class="message_holder"></div>
+<form action="" method="POST">
+    <input type="text" class="trkaz" placeholder="Track az"/>
+    <input type="submit"/>
+</form>
+
+<div id="map"></div>
+<script src="{{ url_for('static', filename='js/vendor/modernizr-3.11.2.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/plugins.js') }}"></script>
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDyHlT4j3tWgPK1FkTFZfsSskSIkYTS5Sw&v=weekly"
+></script>
+<script src="{{ url_for('static', filename='js/index.js') }}"></script>
+
+<script>
+    var upstreamIcon = {
+        path: 'M28.6,17.5L16.1,4.9l0,0 c-0.1-0.1-0.2-0.2-0.3-0.2c0,0-0.1,0-0.1-0.1c-0.1,0-0.1-0.1-0.2-0.1c-0.1,0-0.1,0-0.2-0.1c0,0-0.1,0-0.1,0c-0.1,0-0.2,0-0.3,0 c0,0,0,0,0,0l0,0c-0.1,0-0.2,0-0.3,0c-0.1,0-0.1,0-0.1,0c-0.1,0-0.1,0-0.2,0.1c-0.1,0-0.1,0.1-0.2,0.1c0,0-0.1,0-0.1,0.1 c-0.1,0.1-0.2,0.1-0.3,0.2c0,0,0,0,0,0l0,0c0,0,0,0,0,0L1,17.5l0,0c-0.7,0.7-0.7,1.8,0,2.5s1.8,0.7,2.5,0l9.6-9.6 c0,6.7,0,34.2,0,34.2c0,1,0.8,1.7,1.7,1.7s1.7-0.8,1.7-1.7V10.4l9.6,9.6c0.7,0.7,1.8,0.7,2.5,0S29.3,18.2,28.6,17.5z',
+        fillColor: '#fbb040',
+        fillOpacity: 1,
+        scale: 1.5,
+        strokeColor: '#000',
+        strokeWeight: 0.5,
+        origin: new google.maps.Point(0, 0),
+        anchor: new google.maps.Point(15, 50),
+        rotation: 44,
+    }
+
+    var marker = new google.maps.Marker({
+        // The below line is equivalent to writing:
+        // position: new google.maps.LatLng(-34.397, 150.644)
+        position: {lat: 57.70207465277778, lng: 12.139774305555555},
+        icon: upstreamIcon,
+        draggable: true,
+        map: map,
+    });
+    const infowindow = new google.maps.InfoWindow({
+        content: "<p>Marker Location:</p>",
+    });
+    google.maps.event.addListener(marker, "click", () => {
+        infowindow.content = "<p>Marker Location:" + marker.getPosition() + "</p><p>Rotation:" + marker.icon.rotation + "</p>"
+        infowindow.open(map, marker);
+    });
+
+    function setAzimuth(az) {
+        var icon = marker.getIcon();
+        icon.rotation = az;
+        marker.setIcon(icon);
+    }
+</script>
+<script>
+
+</script>
+</body>
+</html>
