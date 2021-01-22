@@ -7,11 +7,9 @@ import pcf8574
 import sqlite3
 import queue
 
-from flask import Flask, render_template, session, request, \
-    copy_current_request_context
-from flask_socketio import SocketIO, emit, join_room, leave_room, \
-    close_room, rooms, disconnect
-import maidenhead.src.maidenhead as mh
+from flask import Flask, render_template, request
+from flask_socketio import SocketIO, emit
+import locator.src.maidenhead as mh
 
 # Set this variable to "threading", "eventlet" or "gevent" to test the
 # different async modes, or leave it set to None for the application to choose
@@ -386,7 +384,7 @@ def getdata():
 
 @app.route("/", methods=['GET', 'POST'])
 def mapview():
-    n, s, w, e, lon, lat = mh.to_rect(my_qth)
+    n, s, w, e, lon, lat = mh.to_rect(myqth)
 
     user_location = (lon, lat)
 

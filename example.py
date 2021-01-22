@@ -1,5 +1,5 @@
 from flask import Flask, render_template
-import maidenhead.src.maidenhead as mh
+import locator.src.maidenhead as mh
 
 import math
 
