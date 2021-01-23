@@ -21,8 +21,10 @@
     <meta name="theme-color" content="#fafafa">
     <script src="https://polyfill.io/v3/polyfill.min.js?features=default"></script>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.5.1/jquery.min.js" integrity="sha512-bLT0Qm9VnAYZDflyKcBaQ2gg0hSYNQrJ8RilYldYQ1FxQYoCLtUjuuRuZo+fjqhx/qtq/1itJ0C2ejDxltZVFg==" crossorigin="anonymous"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/3.0.4/socket.io.js" integrity="sha512-aMGMvNYu8Ue4G+fHa359jcPb1u+ytAF+P2SCb+PxrjCdO3n3ZTxJ30zuH39rimUggmTwmh2u7wvQsDTHESnmfQ==" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.5.1/jquery.min.js" integrity="sha512-bLT0Qm9VnAYZDflyKcBaQ2gg0hSYNQrJ8RilYldYQ1FxQYoCLtUjuuRuZo+fjqhx/qtq/1itJ0C2ejDxltZVFg=="
+            crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/3.0.4/socket.io.js" integrity="sha512-aMGMvNYu8Ue4G+fHa359jcPb1u+ytAF+P2SCb+PxrjCdO3n3ZTxJ30zuH39rimUggmTwmh2u7wvQsDTHESnmfQ=="
+            crossorigin="anonymous"></script>
 
 
     <script type="text/javascript">
@@ -45,23 +47,37 @@
                     });
                 });
             });
-            socket.on('my_response', function(msg, cb) {
+            socket.on('my_response', function (msg, cb) {
                 $('#log').append('<br>' + $('<div/>').text('Received #' + msg.count + ': ' + msg.data).html());
                 if (cb)
                     cb();
             });
 
             socket.on('set_azel', function (msg) {
+                console.log("Got azel " + msg.az + " " + msg.el);
                 {#confirm("Set_azel: " + msg.az + "/" + msg.el);#}
                 $('#log').append('<br>' + $('<div/>').text('Received azel#' + msg.count + ': ' + msg.data).html());
                 setAzimuth(msg.az);
             })
+
+            socket.on('set_origo', function (msg) {
+                console.log("Got origo " + msg.lat + " " + msg.lon);
+                {#confirm("Set_azel: " + msg.az + "/" + msg.el);#}
+                $('#log').append('<br>' + $('<div/>').text('Received origo#' + msg.count + ': ' + msg.data).html());
+                setOrigo(msg.lat, msg.lon, msg.qth, msg.n, msg.s, msg.w, msg.e)
+            })
+
+            socket.on('add_rect', function (msg) {
+                console.log("Got rect " + msg.id)
+                addRect(msg.id, msg.n, msg.s, msg.w, msg.e);
+            })
+
         });
     </script>
 
 </head>
 <body>
-<h3>SM6FBQ QTH JO67BQ</h3>
+<h3>SM6FBQ QTH <span id="myqth">JO67BQ</span></h3>
 
 <div class="message_holder"></div>
 <form action="" method="POST">
@@ -70,11 +86,17 @@
 </form>
 
 <div id="map"></div>
+
 <script src="{{ url_for('static', filename='js/vendor/modernizr-3.11.2.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plugins.js') }}"></script>
 <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDyHlT4j3tWgPK1FkTFZfsSskSIkYTS5Sw&v=weekly"
 ></script>
-<script src="{{ url_for('static', filename='js/index.js') }}"></script>
+<script>
+        var map=new google.maps.Map(document.getElementById("map"), {
+                                                                center: { lat: 0.0, lng:0.0 },
+                                                                zoom: 8,}
+                                                                );
+</script>
 
 <script>
     var upstreamIcon = {
@@ -92,7 +114,7 @@
     var marker = new google.maps.Marker({
         // The below line is equivalent to writing:
         // position: new google.maps.LatLng(-34.397, 150.644)
-        position: {lat: 57.70207465277778, lng: 12.139774305555555},
+        position: {lat: 0.0, lng: 0.0},
         icon: upstreamIcon,
         draggable: true,
         map: map,
@@ -109,6 +131,34 @@
         var icon = marker.getIcon();
         icon.rotation = az;
         marker.setIcon(icon);
+    }
+
+    function setOrigo(lat, lon, qth, n, s, w, e) {
+        marker.setPosition({"lat": lat, "lng": lon});
+        document.getElementById("myqth").innerHTML = qth;
+        map.setCenter({"lat": lat, "lng": lon});
+        // console.log("Moved map center to " + lat + " " + lon)
+        addRect(qth, n, s, w, e);
+
+    }
+
+    function addRect(id, n, s, w, e)
+    {
+        var my_rect = new google.maps.Rectangle();
+        my_rect.setOptions({
+              strokeColor: "#255f58",
+              strokeOpacity: 0.8,
+              strokeWeight: 2,
+              fillColor: "#3f4738",
+              fillOpacity: 0.35,
+              id: id,
+              map,
+            bounds: {"north":n, "south":s, "west":w, "east":e}})
+    }
+
+    function rmRect(id)
+    {
+        document.getElementById(id).setMap(null)
     }
 </script>
 <script>
