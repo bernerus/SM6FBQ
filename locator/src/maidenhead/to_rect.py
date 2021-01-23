@@ -27,39 +27,58 @@ def to_rect(maiden: str) -> T.Tuple[float, float, float, float, float, float]:
     if not 12 >= N >= 2 and N % 2 == 0:
         raise ValueError("Maidenhead locator requires 2-8 characters, even number of characters")
 
-    north, west = to_location(maiden)
+    south, west = to_location(maiden)
+
+    lonsize = 20
+    latsize = 10
 
     if N == 2:
-        east = west + 20
-        south = north + 10
+        east = west + lonsize
+        north = south + latsize
 
-        return north, south, west, east, south - 5, west + 10
+        return north, south, west, east, south + latsize/2, west + lonsize/2
+
+    lonsize /= 10
+    latsize /= 10
+
     if N == 4:
-        east = west + 2
-        south = north + 1
+        east = west + lonsize
+        north = south + latsize
 
-        return north, south, west, east, south - 1, west + 0.5
+        return north, south, west, east, south + latsize / 2, west + lonsize / 2
+
+    lonsize /= 24
+    latsize /= 24
 
     if N == 6:
-        east = west + 5.0 / 60
-        south = north + 2.5 / 60
+        east = west + lonsize
+        north = south + latsize
 
-        return north, south, west, east, south - 2.5 / 120, west + 5.0 / 120
+        return north, south, west, east, south + latsize / 2, west + lonsize / 2
+
+    lonsize /= 10
+    latsize /= 10
 
     if N == 8:
-        east = west + 5.0 / 600
-        south = north + 2.5 / 600
+        east = west + lonsize
+        north = south + latsize
 
-        return north, south, west, east, south - 2.5 / 1200, west + 5.0 / 1200
+        return north, south, west, east, south + latsize / 2, west + lonsize / 2
+
+    lonsize /= 24
+    latsize /= 24
 
     if N == 10:
-        east = west + 5.0 / 600 / 24
-        south = north + 2.5 / 600 / 24
+        east = west + lonsize
+        north = south + latsize
 
-        return north, south, west, east, south - 2.5 / 600 / 24 / 2, west + 5.0 / 600 / 24 / 2
+        return north, south, west, east, south + latsize / 2, west + lonsize / 2
+
+    lonsize /= 10
+    latsize /= 10
 
     if N == 12:
-        east = west + 5.0 / 600 / 240
-        south = north + 2.5 / 600 / 240
+        east = west + lonsize
+        north = south + latsize
 
-        return north, south, west, east, south - 2.5 / 600 / 240 / 2, west + 5.0 / 600 / 240 / 2
+        return north, south, west, east, south + latsize / 2, west + lonsize / 2

@@ -1,21 +1,30 @@
 
 `maidenhead` provides a simple, yet effective location hashing algorithm.
-Maidenhead allows arvitrary precision depending on the length of the locator code.
+Maidenhead allows abvitrary precision depending on the length of the locator code.
+
+This code is a fork of the maidenhead package by Michael Hirsch, extended 
+for increased precision. This extensions are however not agreed upon in the 
+Maidenhead system, therefore I have chosen to not attempt to include
+the changes in the published code.
+
+----
 
 This code provides 8 levels of increasing accuracy
 
   Level |  Precision       | Latitude distance |  Example code
 --------|------------------------------------------------------
   1     |  10x20°          | 1113 km           |  IO
-  2     |  1x2°            | 111 km            |  IO96
-  3     |  2.5 x 5'        | 4.6 km            |  IO96xc
-  4     |  15 x 30"        | 463 m             |  IO96xc74
-  5*    |  0.625 x 1.25"   | 19.3 m            |  IO96xc74tt
-  6*    |  0.0625 x 0.125" | 1.9 m             |  IO96xc74tt12
+  2     |  1x2°            | 111 km            |  IO91
+  3     |  2.5 x 5'        | 4.6 km            |  IO91wm
+  4     |  15 x 30"        | 463 m             |  IO91wm41
+  5*    |  0.625 x 1.25"   | 19.3 m            |  IO91wm41pu
+  6*    |  0.0625 x 0.125" | 1.9 m             |  IO91wm41pu67
+
+(IN91wm41pu67 is very near the center of Nelson's column at 
+Trafalgar Square, London UK.)
 
 * The levels 5 and 6 are not internationally agreed upon. 
   Here they are a recursive extension of the levels 3 and 4
- 
 
 ## Examples
 

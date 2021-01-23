@@ -44,7 +44,7 @@ def to_location(maiden: str) -> T.Tuple[float, float]:
         lat += int(maiden[7]) * 2.5 / 600
     if N >= 10:
         lon += (ord(maiden[8]) - Oa) * 5.0 / 600 / 24
-        lat += (ord(maiden[9]) - Oa) * 2.5 /600 / 24
+        lat += (ord(maiden[9]) - Oa) * 2.5 / 600 / 24
     if N >= 12:
         lon += int(maiden[10]) * 5.0 /  600 / 240
         lat += int(maiden[11]) *  2.5 / 600 / 240
