@@ -6,6 +6,7 @@ import smbus2
 import pcf8574
 import sqlite3
 import queue
+from geo import sphere
 
 from flask import Flask, render_template, request
 from flask_socketio import SocketIO, emit
@@ -38,6 +39,11 @@ db.execute("CREATE TABLE IF NOT EXISTS config_int (key text PRIMARY KEY , value 
 
 msgq = queue.Queue()
 
+myqth = "JO67BQ68SL59"  # SM6FBQ
+
+
+# myqth = "IO91wm41pu67"  # Nelson's column, London UK
+
 class AzElControl:
 
     def __init__(self, hysteresis=1, gpio_bus=1):
@@ -62,17 +68,20 @@ class AzElControl:
         self.CCW_BEARING_STOP: int = 162
         self.CW_BEARING_STOP: int = 167
 
+        self.BEARING_OVERLAP = abs(self.CW_BEARING_STOP - self.CCW_BEARING_STOP)
+
         bearing_range = self.CW_BEARING_STOP - self.CCW_BEARING_STOP + 360
 
-        self.ticks_per_degree = (self.AZ_CW_MECH_STOP - self.AZ_CCW_MECH_STOP)/bearing_range
+        self.ticks_per_degree = (self.AZ_CW_MECH_STOP - self.AZ_CCW_MECH_STOP) / bearing_range
+
+        self.TICKS_OVERLAP = int(self.BEARING_OVERLAP * self.ticks_per_degree)
+        self.ticks_per_rev = self.AZ_CW_MECH_STOP - self.TICKS_OVERLAP
 
         self.last_sent_az = None
 
         self.retriggering = None
         self.rotatiog_cw = None
         self.rotating_ccw = None
-
-
 
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(self.AZ_INT, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -95,11 +104,28 @@ class AzElControl:
 
         self.last_sense = 0xff
         self.az_target = None
-        self.az = 0
         self.el = 0
+        self.inc = 0
         self.inc = 0
         self.ignore_cw_stops = False
         self.ignore_ccw_stops = False
+        self.az = 0
+
+        test_az2ticks = False
+        if test_az2ticks:
+            self.az = 400
+            ranges = list(range(160, 361)) + list(range(0, 170))
+
+            for deg in ranges:
+                print(deg, self.az, self.az2ticks(deg))
+
+            self.az = 270
+            print()
+
+            for deg in ranges:
+                print(deg, self.az, self.az2ticks(deg))
+
+            self.az = 0
 
     def ticks2az(self, ticks):
         az = self.CCW_BEARING_STOP + ticks / self.ticks_per_degree
@@ -109,13 +135,28 @@ class AzElControl:
             az += 360
         return int(az)
 
-    def az2ticks(self, az):
-        az1 = az - self.CCW_BEARING_STOP
-        if az1 < 0:
-            az1 += 360
-        if az1 > 360:
-            az1 -= 360
-        return int(self.ticks_per_degree * az1)
+    def az2ticks(self, degrees):
+        degs1 = degrees - self.CCW_BEARING_STOP
+        ticks = round(self.ticks_per_degree * degs1)
+        if ticks < self.AZ_CCW_MECH_STOP:
+            ticks += self.ticks_per_rev
+        if ticks >= self.AZ_CW_MECH_STOP:
+            ticks -= self.ticks_per_degree
+        if (ticks - self.AZ_CCW_MECH_STOP > self.ticks_per_rev or
+                ticks - self.AZ_CCW_MECH_STOP < self.TICKS_OVERLAP):
+            low_value = ticks
+            if (ticks + self.ticks_per_rev) > self.AZ_CW_MECH_STOP:
+                high_value = ticks
+                low_value = ticks - self.ticks_per_rev
+            else:
+                low_value = ticks
+                high_value = ticks + self.ticks_per_rev
+            if abs(self.az - high_value) < abs(self.az - low_value):
+                ticks = high_value
+            else:
+                ticks = low_value
+
+        return ticks
 
     def el_interrupt(self, last, current):
         pass
@@ -215,7 +256,7 @@ class AzElControl:
                     self.az_ccw()
 
     def az_stop(self):
-        #print("Stop azimuth rotation")
+        # print("Stop azimuth rotation")
         self.rotating_ccw = False
         self.rotating_cw = False
         self.p0.byte_write(0xff, ~self.STOP_AZ)
@@ -224,7 +265,7 @@ class AzElControl:
         ctl.store_az()
 
     def az_ccw(self):
-        #print("Rotate anticlockwise")
+        # print("Rotate anticlockwise")
         self.rotating_ccw = True
         self.rotating_cw = False
         self.p0.byte_write(0xff, self.STOP_AZ)
@@ -233,7 +274,7 @@ class AzElControl:
         print("Rotating anticlockwise")
 
     def az_cw(self):
-        #print("Rotate clockwise")
+        # print("Rotate clockwise")
         self.rotating_cw = True
         self.rotating_ccw = False
         self.p0.byte_write(0xff, self.STOP_AZ)
@@ -326,8 +367,13 @@ class AzElControl:
         to_send_az = self.ticks2az(self.az)
         if to_send_az != self.last_sent_az or force:
             print("Queueing azel %d %d" % (to_send_az, self.el))
-            msgq.put({"az": to_send_az, "el": self.el})
+            msgq.put(("set_azel", {"az": to_send_az, "el": self.el}))
             self.last_sent_az = to_send_az
+
+    def send_origo(self, force=None):
+        n, s, w, e, lat, lon = mh.to_rect(myqth)
+        print("Queueing origo %f %f" % (lon, lat))
+        msgq.put(("set_origo", {"lon": lon, "lat": lat, "qth": myqth, "n": n, "s": s, "w": w, "e": e}))
 
 
 @app.route('/az')
@@ -364,10 +410,9 @@ def track():
 def untrack():
     ctl.az_target = None
     ctl.az_stop()
-    print("Stopped tracking at az=%d degrees"% ctl.ticks2az(ctl.az))
+    print("Stopped tracking at az=%d degrees" % ctl.ticks2az(ctl.az))
     return "Stopped tracking"
 
-myqth = "JO67BQ68SL59"
 
 @app.route("/myqth")
 def my_qth():
@@ -382,11 +427,29 @@ def getdata():
     # put data in database or something
 
 
+def circle(size, user_location):
+    c = {  # draw circle on map (user_location as center)
+        'stroke_color': '#0000FF',
+        'stroke_opacity': .5,
+        'stroke_weight': 1,
+        # line(stroke) style
+        'fill_color': '#FFFFFF',
+        'fill_opacity': 0,
+        # fill style
+        'center': {  # set circle to user_location
+            'lat': user_location[0],
+            'lng': user_location[1]
+        },
+        'radius': size
+    }
+    return c
+
+
 @app.route("/", methods=['GET', 'POST'])
 def mapview():
-    n, s, w, e, lon, lat = mh.to_rect(myqth)
+    n, s, w, e, lat, lon = mh.to_rect(myqth)
 
-    user_location = (lon, lat)
+    user_location = (lat, lon)
 
     rect = {
         "stroke_color": '#0000FF',
@@ -414,7 +477,7 @@ def mapview():
             'lat': user_location[0],
             'lng': user_location[1]
         },
-        'radius': 500  # circle size (50 meters)
+        'radius': 5000  # circle size (500 meters)
     }
 
     return render_template('example.html', async_mode=socket_io.async_mode)
@@ -428,13 +491,29 @@ def messageReceived(methods=['GET', 'POST']):
 def handle_my_custom_event(json):
     print('received my event: ' + str(json))
     emit('my response', json, callback=messageReceived)
-    ctl.send_azel()
+    ctl.send_azel(force=True)
+
 
 @socket_io.on("track az")
 def handle_track_az(json):
     # print('received track_az: ' + str(json))
     # emit('my response', json, callback=messageReceived)
-    ctl.az_track(int(json['az']))
+
+    try:
+        az_value = int(json["az"])
+        ctl.az_track(az_value)
+    except ValueError:
+        pass
+
+    mn, ms, mw, me, mlat, mlon = mh.to_rect(myqth)
+    n, s, w, e, lat, lon = mh.to_rect(json["az"])
+
+    bearing = sphere.bearing((mlon, mlat), (lon, lat))
+
+    print("Calculated bearing from %s to %s to be %f" % (myqth, json["az"], bearing))
+    ctl.az_track(int(bearing))
+    msgq.put(("add_rect", {"id": json["az"], "n": n, "s": s, "w": w, "e": e}))
+
 
 def background_thread():
     """Example of how to send server generated events to clients."""
@@ -442,10 +521,9 @@ def background_thread():
     while True:
         count += 1
         if not msgq.empty():
-            item = msgq.get_nowait()
-            # print("Sending azel %d %s" % (count, item))
-            socket_io.emit("set_azel", item)
-            # print("Sent azel %d %s" % (count, item))
+            what, item = msgq.get_nowait()
+            print("Sending %s %d %s" % (what, count, item))
+            socket_io.emit(what, item, broadcast=True)
         else:
             socket_io.sleep(0.1)
 
@@ -466,15 +544,18 @@ def connect():
     except queue.Empty:
         pass
 
+    ctl.send_origo()
     ctl.send_azel()
     with thread_lock:
         if thread is None:
             thread = socket_io.start_background_task(background_thread)
     emit('my_response', {'data': 'Connected', 'count': 0})
 
+
 @socket_io.on('disconnect')
 def test_disconnect():
     print('Client disconnected', request.sid)
+
 
 if __name__ == '__main__':
     pass
