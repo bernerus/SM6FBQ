@@ -18,6 +18,19 @@
     <link rel='stylesheet' href="{{ url_for('static',filename='css/main.css') }}">
     <link rel='stylesheet' href="{{ url_for('static',filename='css/style.css') }}">
 
+    <!-- animate -->
+    <link rel='stylesheet' href="{{ url_for('static',filename='css/animate.min.css') }}">
+		<!-- bootstrap -->
+    <link rel='stylesheet' href="{{ url_for('static',filename='css/bootstrap.min.css') }}">
+		<!-- font-awesome -->
+    <link rel='stylesheet' href="{{ url_for('static',filename='css/font-awesome.min.css') }}">
+		<!-- google font -->
+		<link href='http://fonts.googleapis.com/css?family=Raleway:400,300,700,800' rel='stylesheet' type='text/css'>
+		<!-- fullpage -->
+    <link rel='stylesheet' href="{{ url_for('static',filename='css/jquery.fullPage.css') }}">
+		<!-- custom -->
+    <link rel='stylesheet' href="{{ url_for('static',filename='css/templatemo-style.css') }}">
+
     <meta name="theme-color" content="#fafafa">
     <script src="https://polyfill.io/v3/polyfill.min.js?features=default"></script>
 
@@ -28,9 +41,11 @@
 
 
     <script type="text/javascript">
+        var socket
+
         $(document).ready(function () {
             // var mypeer = 'http://' + document.domain + ':' + location.port;
-            var socket = io();
+            socket = io()
 
             console.log("Connecting to server");
 
@@ -77,15 +92,22 @@
 
 </head>
 <body>
+<div id="page_header">
 <h3>SM6FBQ QTH <span id="myqth">JO67BQ</span></h3>
+</div>
 
 <div class="message_holder"></div>
 <form action="" method="POST">
     <input type="text" class="trkaz" placeholder="Track az"/>
-    <input type="submit"/>
+    <button id="track_button" type="submit" onclick="send_track_az()">Track</button>
+    <button id="calibrate_button" type="button" onclick="send_calibrate()">Calibrate</button>
+    <button id="stop_button" type="button" onclick="send_stop()">Stop</button>
+    <button id="release_button" type="button" onclick="send_release()">Release</button>
+    <button id="pointing_north_button" type="button" onclick="send_az()">Pointing North</button>
+    <vurrin id="send_cq" type="button" onclick="send_cq()">Send CQ</button>
 </form>
 
-<div id="map"></div>
+<div id="map" class="map"></div>
 
 <script src="{{ url_for('static', filename='js/vendor/modernizr-3.11.2.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plugins.js') }}"></script>
@@ -96,6 +118,35 @@
                                                                 center: { lat: 0.0, lng:0.0 },
                                                                 zoom: 8,}
                                                                 );
+</script>
+
+<script>
+    function send_calibrate(az) {
+        console.log("Sending calibrate");
+        socket.emit('calibrate', {});
+    }
+
+    function send_stop(az) {
+        console.log("Sending stop");
+        socket.emit('stop', {});
+    }
+
+    function send_release(az) {
+        send_stop();
+        console.log("Sending release");
+        socket.emit('untrack', {});
+    }
+
+    function send_az(az) {
+        console.log("Pointing North");
+        socket.emit('set_az',{'az': 0} );
+    }
+
+    function send_cq(az) {
+        console.log("Sending CQ");
+        socket.emit('transmit_cw',{'msg': "cq cq cq test de sm6fbq sm6fbq +k"} );
+    }
+
 </script>
 
 <script>
