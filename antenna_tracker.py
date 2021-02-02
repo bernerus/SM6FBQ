@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 from threading import Lock
-import time
 import RPi.GPIO as GPIO
-import smbus2
-import pcf8574
 from pcf8574 import *
 import sqlite3
 import queue
@@ -13,6 +10,7 @@ from flask import Flask, render_template, request
 from flask_socketio import SocketIO, emit
 import locator.src.maidenhead as mh
 from morsetx import *
+import datetime
 
 # Set this variable to "threading", "eventlet" or "gevent" to test the
 # different async modes, or leave it set to None for the application to choose
@@ -34,10 +32,22 @@ thread_lock = Lock()
 devices_data = {}  # dict to store data of devices
 devices_location = {}  # dict to store coordinates of devices
 
-db = sqlite3.connect("/home/pi/SM6FBQ/azel.db")
+db = sqlite3.connect("/home/bernerus/SM6FBQ/station.db")
 
 db.execute("CREATE TABLE IF NOT EXISTS azel_current (id INTEGER PRIMARY KEY AUTOINCREMENT, az int, el int)")
-db.execute("CREATE TABLE IF NOT EXISTS config_int (key text PRIMARY KEY , value int)")
+db.execute("CREATE TABLE IF NOT EXISTS config_int (key text PRIMARY KEY , value int, time_start text, time_stop text)")
+db.execute("CREATE TABLE IF NOT EXISTS config_str (key text PRIMARY KEY , value int, time_start text, time_stop text)")
+db.execute("""CREATE TABLE IF NOT EXISTS nac_log 
+             (qsoid INTEGER PRIMARY KEY AUTOINCREMENT, 
+             date text, 
+             time text, 
+             callsign text, 
+             tx text, 
+             rx text, 
+             locator text, 
+             distance int, 
+             square int, 
+             points int)""")
 
 msgq = queue.Queue()
 
@@ -89,7 +99,7 @@ class AzElControl:
         self.last_sent_az = None
 
         self.retriggering = None
-        self.rotatiog_cw = None
+        self.rotating_cw = None
         self.rotating_ccw = None
 
         GPIO.setmode(GPIO.BCM)
@@ -116,8 +126,6 @@ class AzElControl:
         self.el = 0
         self.inc = 0
         self.inc = 0
-        self.ignore_cw_stops = False
-        self.ignore_ccw_stops = False
         self.az = 0
 
         test_az2ticks = False
@@ -153,7 +161,6 @@ class AzElControl:
             ticks -= self.ticks_per_degree
         if (ticks - self.AZ_CCW_MECH_STOP > self.ticks_per_rev or
                 ticks - self.AZ_CCW_MECH_STOP < self.TICKS_OVERLAP):
-            low_value = ticks
             if (ticks + self.ticks_per_rev) > self.AZ_CW_MECH_STOP:
                 high_value = ticks
                 low_value = ticks - self.ticks_per_rev
@@ -179,39 +186,20 @@ class AzElControl:
             print("Stop interrupt skipped. timer is cleared")
             return  # Timed is cleared
         if self.p0.bit_read("AZ_TIMER") and not self.calibrating and not self.rotating_cw and not self.rotating_ccw:
-            print("Stop interrupt skipped. No rotation going on, retrig=%s, cw=%s, ccw=%s, calibrating=%s" % (self.retriggering, self.rotating_cw, self.rotating_ccw, self.calibrating))
+            print("Stop interrupt skipped. No rotation going on, retrig=%s, cw=%s, ccw=%s, calibrating=%s" %
+                  (self.retriggering, self.rotating_cw, self.rotating_ccw, self.calibrating))
             return  # We are not rotating
-        print("Azel interrupt, retrig=%s, cw=%s, ccw=%s, calibrating=%s" % (self.retriggering, self.rotating_cw, self.rotating_ccw, self.calibrating))
+        print("Azel interrupt, retrig=%s, cw=%s, ccw=%s, calibrating=%s" %
+              (self.retriggering, self.rotating_cw, self.rotating_ccw, self.calibrating))
         # time.sleep(1)
         # We ran into a mech stop
-        if False:
-            if inc == 0:
-                # print("Mechanical stop. Unknown dir")
-                if not p0.bit_read("ROTATE_CW"):
-                    # print("Was running clockwise")
-                    inc = 1
-                else:
-                    # print("Was running anticlockwise")
-                    inc = -1
-            if inc > 0 and not ignore_cw_stops:
-                # print("Mechanical stop clockwise")
-                self.az = AZ_CW_MECH_STOP
-                self.ignore_ccw_stops = True
-                # print("Ignoring anticlockwise stops")
-            if inc < 0 and not ignore_ccw_stops:
-                # print("Mechanical stop anticlockwise")
-                self.az = AZ_CCW_MECH_STOP
-                self.ignore_cw_stops = True
-                # print("Ignoring clockwise stops")
+
+        if not self.p0.bit_read("ROTATE_CW"):
+            # print("Mechanical stop clockwise")
+            self.az = self.AZ_CW_MECH_STOP
         else:
-            if not self.p0.bit_read("ROTATE_CW"):
-                # print("Mechanical stop clockwise")
-                self.az = self.AZ_CW_MECH_STOP
-                self.ignore_ccw_stops = True
-            else:
-                # print("Mechanical stop anticlockwise")
-                self.az = self.AZ_CCW_MECH_STOP
-                self.ignore_cw_stops = True
+            # print("Mechanical stop anticlockwise")
+            self.az = self.AZ_CCW_MECH_STOP
 
         print("Az set to %d ticks" % self.az)
         self.send_azel()
@@ -233,12 +221,6 @@ class AzElControl:
             return
         self.az += inc
         if inc:
-            if inc > 0:
-                ignore_ccw_stops = False
-                # print("Enabling ccw stops")
-            else:
-                ignore_cw_stops = False
-                # print("Enabling cw stops")
             self.retrigger_az_timer()
 
         #            print("Ticks:", self.az)
@@ -305,7 +287,7 @@ class AzElControl:
         x = 1
         ret = ""
         sensebits = {1: "A", 2: "B", 4: "E", 8: "C"}
-        while (x < 16):
+        while x < 16:
             if value & x:
                 ret += sensebits[x]
             else:
@@ -332,7 +314,8 @@ class AzElControl:
             # print("Dispatching to el_interrupt")
             self.el_interrupt(self.last_sense & el_mask, current_sense & el_mask)
         if diff & stop_mask and (current_sense & stop_mask == 0):
-            print("Dispatching to stop_interrupt, diff=%x, current_sense=%x, last_sense=%x" % (diff, current_sense, self.last_sense))
+            print("Dispatching to stop_interrupt, diff=%x, current_sense=%x, last_sense=%x" %
+                  (diff, current_sense, self.last_sense))
             self.stop_interrupt(self.last_sense & stop_mask, current_sense & stop_mask)
 
         if diff & manual_mask and (current_sense & manual_mask != manual_mask):
@@ -348,7 +331,6 @@ class AzElControl:
         self.retriggering = False
 
     def restore_az(self):
-        db = sqlite3.connect("/home/pi/SM6FBQ/azel.db")
         cur = db.cursor()
         cur.execute("SELECT az FROM azel_current where ID=0")
         rows = cur.fetchall()
@@ -358,12 +340,13 @@ class AzElControl:
             self.az = 0
             cur.execute("INSERT INTO azel_current VALUES(0,0,0)")
             db.commit()
-        db.close()
+        cur.close()
 
     def store_az(self):
-        db = sqlite3.connect("/home/pi/SM6FBQ/azel.db")
+        db = sqlite3.connect("/home/bernerus/SM6FBQ/station.db")
         cur = db.cursor()
         cur.execute("UPDATE azel_current set az=? WHERE ID=0", (self.az,))
+        cur.close()
         db.commit()
         db.close()
 
@@ -383,7 +366,7 @@ class AzElControl:
             msgq.put(("set_azel", {"az": to_send_az, "el": self.el}))
             self.last_sent_az = to_send_az
 
-    def send_origo(self, force=None):
+    def send_origo(self):
         n, s, w, e, lat, lon = mh.to_rect(myqth)
         print("Queueing origo %f %f" % (lon, lat))
         msgq.put(("set_origo", {"lon": lon, "lat": lat, "qth": myqth, "n": n, "s": s, "w": w, "e": e}))
@@ -424,6 +407,40 @@ def stop(json):
 
 
 @socket_io.event
+def lookup_locator(json):
+    import math
+    other_loc = json["locator"]
+    mn, ms, mw, me, mlat, mlon = mh.to_rect(myqth)[:6]
+    n, s, w, e, lat, lon = mh.to_rect(other_loc)
+
+    json["bearing"] = sphere.bearing((mlon, mlat), (lon, lat))
+    distance = sphere.distance((mlon, mlat), (lon, lat)) / 1000.0
+    json["distance"] = str(int(distance * 10) / 10.0)
+    points = math.ceil(distance)
+
+    qso_date = json.get("date", datetime.date.today().isoformat())
+
+    cur = db.cursor()
+    cur.execute("SELECT COUNT (DISTINCT substr(locator, 1, 4)) from nac_log where date=?", (qso_date,))
+    rows = cur.fetchall()
+    sqcount = 0
+    if rows:
+        sqcount = rows[0][0]
+
+    cur.execute("""SELECT count(*) from nac_log 
+        where substr(locator,1,4) = ? 
+            and date=? and time>='0700' 
+            and time < '2200'""", (other_loc[:4], qso_date))
+    rows = cur.fetchall()
+    json["square"] = ""
+    if rows[0][0] == 0:
+        json["square"] = sqcount + 1
+        points += 500
+    json["points"] = str(points)
+    emit("locator_data", json)
+
+
+@socket_io.event
 def untrack(json):
     ctl.az_target = None
     ctl.az_stop()
@@ -433,9 +450,9 @@ def untrack(json):
 
 @socket_io.event
 def transmit_cw(json):
-    speed=json.get("speed", None)
-    repeat=json.get("repeat", 1)
-    keyer = Morser(speed=speed)
+    speed = json.get("speed", None)
+    repeat = json.get("repeat", 1)
+    keyer = Morser(speed=speed, p0=ctl.p0)
     keyer.send_message(json["msg"], repeat=repeat)
     pass
 
@@ -443,14 +460,6 @@ def transmit_cw(json):
 @app.route("/myqth")
 def my_qth():
     return myqth
-
-
-@app.route('/getdata', methods=['GET', 'POST'])
-def getdata():
-    json_data = requests.get.args('json')
-    return json_data
-    # you can use this to get request with strings and parse json
-    # put data in database or something
 
 
 def circle(size, user_location):
@@ -509,14 +518,14 @@ def mapview():
     return render_template('example.html', async_mode=socket_io.async_mode)
 
 
-def messageReceived(methods=['GET', 'POST']):
+def message_received():
     print('message was received!!!')
 
 
 @socket_io.on('my event')
 def handle_my_custom_event(json):
     print('received my event: ' + str(json))
-    emit('my response', json, callback=messageReceived)
+    emit('my response', json, callback=message_received)
     ctl.send_azel(force=True)
 
 
@@ -578,10 +587,43 @@ def connect():
             thread = socket_io.start_background_task(background_thread)
     emit('my_response', {'data': 'Connected', 'count': 0})
 
+    cur = db.cursor()
+    cur.execute("""SELECT qsoid, date, time, callsign, tx, rx, locator, distance, square, points 
+                    FROM nac_log WHERE date=DATE('now') ORDER BY date, time""")
+    rows = cur.fetchall()
+    for row in rows:
+        qso = {"id": row[0],
+               "date": row[1],
+               "time": row[2],
+               "callsign": row[3],
+               "tx": row[4],
+               "rx": row[5],
+               "locator": row[6],
+               "distance": row[7],
+               "square": row[8],
+               "points": row[9]}
+        emit("add_qso", qso)
+
+
+@socket_io.event()
+def commit_qso(qso):
+    cur = db.cursor()
+    cur.execute("""INSERT INTO nac_log (date, time, callsign, tx , rx , locator, distance, square, points) 
+                  values (?,?,?,?,?,?,?,?,?)""",
+                (qso["date"], qso["time"], qso["callsign"], qso["tx"], qso["rx"], qso["locator"],
+                 qso["distance"], qso["square"], qso["points"]))
+    cur.execute("Select last_insert_rowid()")
+    db.commit()
+    rows = cur.fetchall()
+    if rows:
+        qso["id"] = rows[0][0]
+    emit("qso_committed", qso)
+    cur.close()
+
 
 @socket_io.on('disconnect')
 def test_disconnect():
-    print('Client disconnected', request.sid)
+    print('Client disconnected', request.host)
 
 
 if __name__ == '__main__':

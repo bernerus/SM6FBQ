@@ -67,16 +67,16 @@ imc = {
 
 class Morser:
 
-    def __init__(self, verbose=True, gpio_bus=1, speed=80):
+    def __init__(self, verbose=False, gpio_bus=1, speed=None, p0=None):
 
+        if speed is None:
+            speed = 80
         self.UNIT_TIME = 6/speed
-        self.CW_KEY = "p5"
+        self.CW_KEY = "CW_KEY"
         self.unit_time = 6/speed
-        self.CW_KEY = "p5"
         self.verbose = verbose
         self.bus = smbus2.SMBus(gpio_bus)
-        self.p0 = pcf8574.PCF(0x20)
-        self.p0.pin_mode(self.CW_KEY, "OUTPUT")
+        self.p0 = p0
 
     def transmit_sentence(self, sentence):
         for (index, word) in enumerate(sentence.split()):

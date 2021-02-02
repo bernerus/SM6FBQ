@@ -186,6 +186,10 @@ textarea {
     /* Style adjustments for high resolution devices */
 }
 
+* {
+  box-sizing: border-box;
+}
+
 /* ==========================================================================
    Print styles.
    Inlined to avoid the additional HTTP request:
