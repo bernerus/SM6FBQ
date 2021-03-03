@@ -66,16 +66,6 @@ video {
 }
 
 /*
- * Remove default fieldset styles.
- */
-
-fieldset {
-    border: 0;
-    margin: 0;
-    padding: 0;
-}
-
-/*
  * Allow only vertical resizing of textareas.
  */
 
@@ -265,3 +255,9 @@ textarea {
     }
 }
 
+fieldset {
+    background: linear-gradient(179deg, rgba(196, 213, 255, 0.93) 7.14%, rgb(247, 249, 255) 98.32%);
+    border-radius: 7px;
+    padding: 6px;
+    border: 1px solid #d8dcdf;
+}

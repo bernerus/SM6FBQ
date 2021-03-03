@@ -1,6 +1,8 @@
 import time
 import pcf8574
 import smbus2
+import queue
+from threading import Lock
 
 imc = {
     'A': '.-',
@@ -61,22 +63,31 @@ imc = {
     '_': '..--.-',
     '"': '.-..-.',
     '$': '...-..-',
-    '@': '.--.-.'
+    '@': '.--.-.',
+    '§': '_...-.-',
+    '#': '...-.-',
 }
+
+cw_thread = None
+cw_thread_lock = Lock()
 
 
 class Morser:
 
-    def __init__(self, verbose=False, gpio_bus=1, speed=None, p0=None):
-
-        if speed is None:
-            speed = 80
-        self.UNIT_TIME = 6/speed
+    def __init__(self, verbose=True, gpio_bus=1, speed=None, p0=None):
+        self.unit_time = None
+        self.set_speed(speed)
         self.CW_KEY = "CW_KEY"
-        self.unit_time = 6/speed
         self.verbose = verbose
         self.bus = smbus2.SMBus(gpio_bus)
         self.p0 = p0
+        self.txq = queue.Queue()
+
+    def set_speed(self, speed):
+        if speed is None:
+            speed = 100
+        self.unit_time = 6 / speed
+        print("CW speed set to ", speed)
 
     def transmit_sentence(self, sentence):
         for (index, word) in enumerate(sentence.split()):
@@ -113,42 +124,51 @@ class Morser:
 
     def transmit_dot(self):
         self.p0.bit_write(self.CW_KEY, "LOW")
-        time.sleep(self.UNIT_TIME)
+        time.sleep(self.unit_time)
 
     def transmit_dash(self):
         self.p0.bit_write(self.CW_KEY, "LOW")
-        time.sleep(self.UNIT_TIME * 3)
+        time.sleep(self.unit_time * 3)
 
     def wait_between_signals(self):
         self.p0.bit_write(self.CW_KEY, "HIGH")
-        time.sleep(self.UNIT_TIME)
+        time.sleep(self.unit_time)
 
     def wait_between_letters(self):
         self.p0.bit_write(self.CW_KEY, "HIGH")
-        time.sleep(self.UNIT_TIME * 3)
+        time.sleep(self.unit_time * 3)
 
     def wait_between_words(self):
         self.p0.bit_write(self.CW_KEY, "HIGH")
-        time.sleep(self.UNIT_TIME * 7)
+        time.sleep(self.unit_time * 7)
 
     def send_message(self, message, repeat=1):
-        count = repeat
-        try:
-            while count:
-                if message != '':
-                    if self.verbose:
-                        print('\nBegin Transmission')
+            count = repeat
+            try:
+                while count:
+                    if message != '':
+                        if self.verbose:
+                            print('\nBegin Transmission')
 
-                    self.transmit_sentence(message)
-                    self.p0.bit_write(self.CW_KEY, "HIGH")
-                count -= 1
-                if count == 0:
-                    break
-                self.wait_between_words()
+                        self.transmit_sentence(message)
+                        self.p0.bit_write(self.CW_KEY, "HIGH")
+                    count -= 1
+                    if count == 0:
+                        break
+                    self.wait_between_words()
 
-            if self.verbose:
-                print('\nEnd Transmission')
+                if self.verbose:
+                    print('\nEnd Transmission')
 
-        finally:
-            self.p0.bit_write(self.CW_KEY, "HIGH")
+            finally:
+                self.p0.bit_write(self.CW_KEY, "HIGH")
 
+    def background_thread(self):
+        """Example of how to send server generated CW."""
+        while True:
+            if not self.txq.empty():
+                item = self.txq.get_nowait()
+                print("Transmitting CW: %s" % (item))
+                self.send_message(item)
+            else:
+                time.sleep(self.unit_time)

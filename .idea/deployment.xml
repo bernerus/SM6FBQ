@@ -1,11 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" promptOnRemoteOverwrite="CHECK_TIMESTAMP" serverName="bernerus@192.168.1.188:22" deleteMissingItems="true" createEmptyFolders="true" autoUploadExternalChanges="true" notifyRemoteChanges="true">
+  <component name="PublishConfigData" autoUpload="Always" promptOnRemoteOverwrite="CHECK_TIMESTAMP" serverName="bernerus@pi3.bernerus.se:22 password" deleteMissingItems="true" createEmptyFolders="true" autoUploadExternalChanges="true" notifyRemoteChanges="true">
     <serverData>
       <paths name="bernerus@192.168.1.188:22">
         <serverdata>
           <mappings>
             <mapping deploy="/tmp/pycharm_project_833" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="bernerus@192.168.1.188:22 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/bernerus/SM6FBQ/pycharm_project_751" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="bernerus@pi3.bernerus.se:22 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/bernerus/SM6FBQ" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>

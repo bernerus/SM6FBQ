@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-from threading import Lock
-import RPi.GPIO as GPIO
-from pcf8574 import *
-import sqlite3
-import queue
-from geo import sphere
+import datetime
+import threading
 
+import RPi.GPIO as GPIO
+import psycopg2
 from flask import Flask, render_template, request
 from flask_socketio import SocketIO, emit
+from geo import sphere
+
 import locator.src.maidenhead as mh
 from morsetx import *
-import datetime
+from pcf8574 import *
 
 # Set this variable to "threading", "eventlet" or "gevent" to test the
 # different async modes, or leave it set to None for the application to choose
@@ -27,27 +27,31 @@ app.config['GOOGLEMAPS_API_KEY'] = api_key
 socket_io = SocketIO(app, async_mode=async_mode)
 
 thread = None
+keyer_thread = None
 thread_lock = Lock()
 
 devices_data = {}  # dict to store data of devices
 devices_location = {}  # dict to store coordinates of devices
 
-db = sqlite3.connect("/home/bernerus/SM6FBQ/station.db")
+db = psycopg2.connect(dbname='ham_station')
+cur = db.cursor()
 
-db.execute("CREATE TABLE IF NOT EXISTS azel_current (id INTEGER PRIMARY KEY AUTOINCREMENT, az int, el int)")
-db.execute("CREATE TABLE IF NOT EXISTS config_int (key text PRIMARY KEY , value int, time_start text, time_stop text)")
-db.execute("CREATE TABLE IF NOT EXISTS config_str (key text PRIMARY KEY , value int, time_start text, time_stop text)")
-db.execute("""CREATE TABLE IF NOT EXISTS nac_log 
-             (qsoid INTEGER PRIMARY KEY AUTOINCREMENT, 
+cur.execute("CREATE TABLE IF NOT EXISTS azel_current (id serial PRIMARY KEY, az int, el int)")
+cur.execute("CREATE TABLE IF NOT EXISTS config_int (key text PRIMARY KEY , value int, time_start text, time_stop text)")
+cur.execute("CREATE TABLE IF NOT EXISTS config_str (key text PRIMARY KEY , value int, time_start text, time_stop text)")
+cur.execute("""CREATE TABLE IF NOT EXISTS nac_log_new 
+             (qsoid serial PRIMARY KEY, 
              date text, 
              time text, 
              callsign text, 
              tx text, 
              rx text, 
              locator text, 
-             distance int, 
+             distance float, 
              square int, 
-             points int)""")
+             points int,
+             complete bool
+             )""")
 
 msgq = queue.Queue()
 
@@ -255,6 +259,7 @@ class AzElControl:
         self.rotating_cw = False
         # self.p0.byte_write(0xff, ~self.STOP_AZ)
         self.p0.bit_write("STOP_AZ", LOW)
+        self.p0.bit_write("ROTATE_CW", HIGH)
         print("Stopped azimuth rotation")
         time.sleep(0.4)  # Allow mechanics to settle
         ctl.store_az()
@@ -343,9 +348,9 @@ class AzElControl:
         cur.close()
 
     def store_az(self):
-        db = sqlite3.connect("/home/bernerus/SM6FBQ/station.db")
+        db = psycopg2.connect(dbname='ham_station')
         cur = db.cursor()
-        cur.execute("UPDATE azel_current set az=? WHERE ID=0", (self.az,))
+        cur.execute("UPDATE azel_current set az = %s WHERE ID=0", (self.az,))
         cur.close()
         db.commit()
         db.close()
@@ -421,15 +426,15 @@ def lookup_locator(json):
     qso_date = json.get("date", datetime.date.today().isoformat())
 
     cur = db.cursor()
-    cur.execute("SELECT COUNT (DISTINCT substr(locator, 1, 4)) from nac_log where date=?", (qso_date,))
+    cur.execute("SELECT COUNT (DISTINCT substr(locator, 1, 4)) from nac_log_new where date=%s", (qso_date,))
     rows = cur.fetchall()
     sqcount = 0
     if rows:
         sqcount = rows[0][0]
 
-    cur.execute("""SELECT count(*) from nac_log 
-        where substr(locator,1,4) = ? 
-            and date=? and time>='0700' 
+    cur.execute("""SELECT count(*) from nac_log_new
+        where substr(locator,1,4) = %s 
+            and date=%s and time>='0700' 
             and time < '2200'""", (other_loc[:4], qso_date))
     rows = cur.fetchall()
     json["square"] = ""
@@ -451,10 +456,20 @@ def untrack(json):
 @socket_io.event
 def transmit_cw(json):
     speed = json.get("speed", None)
+    if speed:
+        keyer.set_speed(speed)
     repeat = json.get("repeat", 1)
-    keyer = Morser(speed=speed, p0=ctl.p0)
-    keyer.send_message(json["msg"], repeat=repeat)
+    # keyer.send_message(json["msg"], repeat=repeat)
+    while(repeat):
+        keyer.txq.put(json["msg"])
+        repeat -= 1
     pass
+
+
+@socket_io.event
+def set_cw_speed(json):
+    speed = int(json.get("speed", None))
+    keyer.set_speed(speed)
 
 
 @app.route("/myqth")
@@ -572,7 +587,7 @@ def my_ping():
 @socket_io.event
 def connect():
     global thread
-
+    global keyer_thread
     # Clear the queue
     try:
         while not msgq.empty():
@@ -585,11 +600,14 @@ def connect():
     with thread_lock:
         if thread is None:
             thread = socket_io.start_background_task(background_thread)
+    # with thread_lock:
+    #     if keyer_thread is None:
+    #         keyer_thread = socket_io.start_background_task(keyer.background_thread)
     emit('my_response', {'data': 'Connected', 'count': 0})
 
     cur = db.cursor()
-    cur.execute("""SELECT qsoid, date, time, callsign, tx, rx, locator, distance, square, points 
-                    FROM nac_log WHERE date=DATE('now') ORDER BY date, time""")
+    cur.execute("""SELECT qsoid, date, time, callsign, tx, rx, locator, distance, square, points, complete 
+                    FROM nac_log_new  ORDER BY date, time""")
     rows = cur.fetchall()
     for row in rows:
         qso = {"id": row[0],
@@ -601,24 +619,36 @@ def connect():
                "locator": row[6],
                "distance": row[7],
                "square": row[8],
-               "points": row[9]}
+               "points": row[9],
+               "complete": row[10]}
         emit("add_qso", qso)
 
 
 @socket_io.event()
 def commit_qso(qso):
     cur = db.cursor()
-    cur.execute("""INSERT INTO nac_log (date, time, callsign, tx , rx , locator, distance, square, points) 
-                  values (?,?,?,?,?,?,?,?,?)""",
+    cur.execute("""INSERT INTO nac_log_new (date, time, callsign, tx , rx , locator, distance, square, points, complete) 
+                  values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING qsoid""",
                 (qso["date"], qso["time"], qso["callsign"], qso["tx"], qso["rx"], qso["locator"],
-                 qso["distance"], qso["square"], qso["points"]))
-    cur.execute("Select last_insert_rowid()")
+                 qso["distance"], qso["square"], qso["points"], qso["complete"]))
+
+    new_qso_id = cur.fetchone()[0]
+
     db.commit()
-    rows = cur.fetchall()
-    if rows:
-        qso["id"] = rows[0][0]
+
+    n, s, w, e, lat, lon = mh.to_rect(qso["locator"])
+    msgq.put(("add_rect", {"id": qso["callsign"], "n": n, "s": s, "w": w, "e": e}))
+    qso["id"] = new_qso_id
     emit("qso_committed", qso)
     cur.close()
+
+
+@socket_io.event()
+def delete_qso(qso):
+    print("Deleting qso with id=%s" % qso["id"])
+    cur = db.cursor()
+    cur.execute("""DELETE FROM nac_log_new WHERE qsoid = %s""", (int(qso["id"]),))
+    db.commit()
 
 
 @socket_io.on('disconnect')
@@ -631,6 +661,11 @@ if __name__ == '__main__':
     ctl = AzElControl(hysteresis=3)
     try:
         ctl.startup()
+        keyer = Morser(speed=None, p0=ctl.p0)
+
+        keyer_thread = threading.Thread(target=keyer.background_thread, args=())
+        keyer_thread.daemon = True  # Daemonize thread
+        keyer_thread.start()
         socket_io.run(app, host='0.0.0.0', port=8877, log_output=False, debug=False)
 
     finally:

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="8c5c6fbb-3857-4233-b4d4-34f9bba29b9f" name="pi3.bernerus.se">
+        <fileTransfer rootFolder="/home/bernerus" accessType="SFTP" host="pi3.bernerus.se" port="22" sshConfigId="73b9b6e7-61cd-4834-ad2c-935f1f20914f" sshConfig="bernerus@pi3.bernerus.se:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
